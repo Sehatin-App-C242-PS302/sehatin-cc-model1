@@ -1,5 +1,7 @@
 fastapi
 uvicorn
 tensorflow
-google-cloud-firestore
-celery[redis]
+scikit-learn
+pymysql
+python-dotenv
+python-jose

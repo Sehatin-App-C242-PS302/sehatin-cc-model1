@@ -1,12 +1,16 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel
 import tensorflow as tf
 import numpy as np
 import pymysql
 from sklearn.preprocessing import StandardScaler
 from dotenv import load_dotenv
+from typing import Optional
 import os
 import logging
+from jose import JWTError, jwt
+from fastapi.security import OAuth2PasswordBearer
+from fastapi import Depends
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +46,12 @@ scaler_y.scale_ = np.array([971.24])  # Standard deviasi dari daily_steps
 
 # Initialize FastAPI
 app = FastAPI()
+
+# JWT Configuration
+SECRET_KEY = "1234"  # Ganti dengan secret key yang aman
+ALGORITHM = "HS256"
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="http://sehatin-cc.vercel.app/api/auth/login")  # URL login Anda
 
 # Request Body Schema
 class HealthData(BaseModel):
@@ -98,6 +108,28 @@ def calculate_recommendations(input_features):
     logging.info(f"Predicted Steps: {recommended_steps}")
     return recommended_steps
 
+def verify_jwt_token(token: str = Depends(oauth2_scheme)):
+    """
+    Middleware untuk memverifikasi JWT token.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload  # Kembalikan payload lengkap
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+
+@app.get("/")
+async def root():
+    return {"message": "Sehatin Model 1 API is running"}
+
 # API Endpoint
 @app.post("/process-data")
 async def process_data(data: HealthData):
@@ -139,3 +171,83 @@ async def process_data(data: HealthData):
     except Exception as e:
         logging.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# yokk bisa yok
+@app.get("/predictions/user/{user_id}")
+async def get_predictions_by_user_id(
+    user_id: int,
+    token_payload: dict = Depends(verify_jwt_token)
+):
+    """
+    Get all predictions by user_id (Requires JWT token and user_id match).
+    """
+    token_user_id = int(token_payload.get("id"))
+
+    # Periksa apakah user_id pada token sama dengan user_id yang diminta
+    if user_id != token_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to access this resource."
+        )
+
+    try:
+        connection = connect_to_db()
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:  # Use DictCursor for key-value pair
+            sql = """
+            SELECT 
+                user_id, gender, age, height, weight, bmi, recommended_steps, created_at
+            FROM 
+                predictions 
+            WHERE 
+                user_id = %s
+            """
+            cursor.execute(sql, (user_id,))
+            results = cursor.fetchall()
+
+        # Jika tidak ada data ditemukan
+        if not results:
+            return {"success": False, "message": "No predictions found for this user."}
+
+        return {"success": True, "data": results}
+    except Exception as e:
+        logging.error(f"Error fetching predictions for user_id {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+    finally:
+        connection.close()
+
+
+@app.get("/predictions/{id}")
+async def get_prediction_by_id(
+    id: int,
+    token_payload: dict = Depends(verify_jwt_token),
+):
+    """
+    Get a single prediction by its unique ID.
+    """
+    try:
+        connection = connect_to_db()
+        with connection.cursor(pymysql.cursors.DictCursor) as cursor:  # Use DictCursor for key-value pairs
+            sql = """
+            SELECT 
+                id, user_id, gender, age, height, weight, bmi, recommended_steps, created_at 
+            FROM 
+                predictions 
+            WHERE 
+                id = %s
+            """
+            cursor.execute(sql, (id,))
+            result = cursor.fetchone()
+
+        # Jika data tidak ditemukan
+        if not result:
+            raise HTTPException(status_code=404, detail="Prediction not found.")
+
+        logging.info(f"Prediction with id {id}: {result}")
+        return {"success": True, "data": result}
+
+    except Exception as e:
+        logging.error(f"Error retrieving prediction by id {id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+    finally:
+        connection.close()
